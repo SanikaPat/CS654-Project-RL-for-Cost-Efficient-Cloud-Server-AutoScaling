@@ -1,19 +1,30 @@
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass
 class TrafficConfig:
     """Configuration for incoming cloud traffic."""
 
-    # Traffic generation pattern:
-    # gradual, daily, spikes, or mixed
+    # Supported traffic patterns:
+    # gradual, daily, spikes, mixed, markov
     pattern: str = "mixed"
 
     # Average incoming requests per time step
     low_rate: float = 10.0
     medium_rate: float = 25.0
     high_rate: float = 45.0
+
+    # Markov traffic transition probabilities
+    # Rows: current traffic level
+    # Columns: next traffic level
+    markov_transition_matrix: list = field(
+        default_factory=lambda: [
+            [0.70, 0.25, 0.05],
+            [0.20, 0.60, 0.20],
+            [0.05, 0.25, 0.70]
+        ]
+    )
 
     # Sudden traffic spikes
     spike_probability: float = 0.05
@@ -26,7 +37,7 @@ class TrafficConfig:
     # Episode configuration
     episode_length: int = 100
 
-    # Random seed for reproducibility
+    # Random seed
     seed: int | None = None
 
 
@@ -40,7 +51,7 @@ class CloudConfig:
     # Requests processed by one server per time step
     server_capacity: int = 10
 
-    # Cost of keeping one server active per time step
+    # Cost per active server per time step
     server_cost: float = 1.0
 
     # Latency and queue settings

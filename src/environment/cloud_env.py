@@ -1,35 +1,75 @@
 
-import numpy as np
+from .config import CloudConfig, TrafficConfig
+from .traffic_generator import TrafficGenerator
 
 
 class CloudAutoScalingEnv:
 
+    ADD_SERVER = 0
+    REMOVE_SERVER = 1
+    KEEP_SERVERS = 2
+
     def __init__(
         self,
-        min_servers=1,
-        max_servers=10,
-        server_capacity=10,
-        server_cost=1.0,
-        latency_target=1.0
+        cloud_config=None,
+        traffic_config=None,
+        seed=None
     ):
-        self.min_servers = min_servers
-        self.max_servers = max_servers
-        self.server_capacity = server_capacity
-        self.server_cost = server_cost
-        self.latency_target = latency_target
 
-        self.actions = [0, 1, 2]
+        self.config = cloud_config or CloudConfig()
+
+        self.traffic_config = traffic_config or TrafficConfig()
+
+        if seed is not None:
+            self.traffic_config.seed = seed
+
+        self.min_servers = self.config.min_servers
+        self.max_servers = self.config.max_servers
+
+        if not 1 <= self.min_servers <= self.max_servers:
+            raise ValueError("Invalid server limits")
+
+        if self.config.server_capacity <= 0:
+            raise ValueError("Server capacity must be positive")
+
+        if self.config.queue_limit <= 0:
+            raise ValueError("Queue limit must be positive")
+
+        self.actions = [
+            self.ADD_SERVER,
+            self.REMOVE_SERVER,
+            self.KEEP_SERVERS
+        ]
+
+        self.traffic_generator = TrafficGenerator(
+            self.traffic_config
+        )
 
         self.traffic_level = 0
         self.active_servers = 2
         self.queue_length = 0
         self.time_step = 0
 
-    def reset(self):
-        """Reset the simulation."""
+    def reset(self, seed=None):
+        """Reset the environment for a new episode."""
 
-        self.traffic_level = 0
-        self.active_servers = 2
+        if seed is not None:
+            self.traffic_generator = TrafficGenerator(
+                TrafficConfig(
+                    **{
+                        **self.traffic_config.__dict__,
+                        "seed": seed
+                    }
+                )
+            )
+
+        self.traffic_level = self.traffic_generator.reset()
+
+        self.active_servers = min(
+            max(2, self.min_servers),
+            self.max_servers
+        )
+
         self.queue_length = 0
         self.time_step = 0
 
@@ -45,16 +85,16 @@ class CloudAutoScalingEnv:
         else:
             queue_level = 2
 
-        capacity = self.active_servers * self.server_capacity
+        capacity = (
+            self.active_servers *
+            self.config.server_capacity
+        )
 
-        if capacity <= 0:
-            latency = float("inf")
-        else:
-            latency = self.queue_length / capacity
+        latency = self.queue_length / capacity
 
         if latency < 0.5:
             latency_level = 0
-        elif latency < 1.0:
+        elif latency < self.config.latency_target:
             latency_level = 1
         else:
             latency_level = 2
@@ -70,67 +110,97 @@ class CloudAutoScalingEnv:
         """Execute one scaling action."""
 
         if action not in self.actions:
-            raise ValueError("Invalid action")
+            raise ValueError(f"Invalid action: {action}")
 
         # Apply scaling decision
-        if action == 0:
+        if action == self.ADD_SERVER:
             self.active_servers = min(
                 self.active_servers + 1,
                 self.max_servers
             )
 
-        elif action == 1:
+        elif action == self.REMOVE_SERVER:
             self.active_servers = max(
                 self.active_servers - 1,
                 self.min_servers
             )
 
         # Generate incoming traffic
-        traffic_rates = [10, 25, 45]
-        incoming_requests = np.random.poisson(
-            traffic_rates[self.traffic_level]
+        (
+            self.traffic_level,
+            incoming_requests,
+            traffic_rate
+        ) = self.traffic_generator.step()
+
+        # Process incoming requests
+        capacity = (
+            self.active_servers *
+            self.config.server_capacity
         )
 
-        # Process requests
-        capacity = self.active_servers * self.server_capacity
-
-        total_requests = self.queue_length + incoming_requests
+        total_requests = (
+            self.queue_length + incoming_requests
+        )
 
         processed = min(total_requests, capacity)
-        self.queue_length = total_requests - processed
 
-        dropped = max(0, self.queue_length - 50)
-        self.queue_length -= dropped
+        remaining_queue = total_requests - processed
 
-        latency = self.queue_length / max(capacity, 1)
+        dropped = max(
+            0,
+            remaining_queue - self.config.queue_limit
+        )
+
+        self.queue_length = remaining_queue - dropped
+
+        # Calculate performance metrics
+        latency = self.queue_length / capacity
+
+        latency_violation = (
+            latency > self.config.latency_target
+        )
 
         # Calculate reward
-        cost = self.active_servers * self.server_cost
+        cost = (
+            self.active_servers *
+            self.config.server_cost
+        )
 
-        latency_penalty = max(
-            0,
-            latency - self.latency_target
-        ) * 5
+        latency_penalty = (
+            max(0, latency - self.config.latency_target)
+            * self.config.latency_penalty
+        )
 
-        dropped_penalty = dropped * 20
+        dropped_penalty = (
+            dropped *
+            self.config.dropped_request_penalty
+        )
 
-        reward = -cost - latency_penalty - dropped_penalty
+        reward = (
+            -cost
+            -latency_penalty
+            -dropped_penalty
+        )
 
-        # Change traffic level
         self.time_step += 1
 
-        if np.random.random() < 0.2:
-            self.traffic_level = np.random.choice([0, 1, 2])
+        done = (
+            self.time_step >= self.config.episode_length
+        )
 
         next_state = self.get_state()
-
-        done = self.time_step >= 100
 
         info = {
             "cost": cost,
             "latency": latency,
+            "latency_violation": latency_violation,
             "dropped_requests": dropped,
-            "active_servers": self.active_servers
+            "incoming_requests": incoming_requests,
+            "traffic_rate": traffic_rate,
+            "processed_requests": processed,
+            "active_servers": self.active_servers,
+            "queue_length": self.queue_length,
+            "scaling_action": action
         }
 
         return next_state, reward, done, info
