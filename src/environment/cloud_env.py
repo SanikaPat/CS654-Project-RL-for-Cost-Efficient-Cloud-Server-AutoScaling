@@ -2,7 +2,6 @@
 from .config import CloudConfig, TrafficConfig
 from .traffic_generator import TrafficGenerator
 
-
 class CloudAutoScalingEnv:
 
     ADD_SERVER = 0
@@ -19,6 +18,7 @@ class CloudAutoScalingEnv:
         self.config = cloud_config or CloudConfig()
 
         self.traffic_config = traffic_config or TrafficConfig()
+        self.traffic_config.episode_length = self.config.episode_length
 
         if seed is not None:
             self.traffic_config.seed = seed
@@ -51,8 +51,6 @@ class CloudAutoScalingEnv:
         self.time_step = 0
 
     def reset(self, seed=None):
-        """Reset the environment for a new episode."""
-
         if seed is not None:
             self.traffic_generator = TrafficGenerator(
                 TrafficConfig(
@@ -76,7 +74,6 @@ class CloudAutoScalingEnv:
         return self.get_state()
 
     def get_state(self):
-        """Convert continuous values into discrete states."""
 
         if self.queue_length < 10:
             queue_level = 0
@@ -107,12 +104,11 @@ class CloudAutoScalingEnv:
         )
 
     def step(self, action):
-        """Execute one scaling action."""
-
         if action not in self.actions:
             raise ValueError(f"Invalid action: {action}")
 
-        # Apply scaling decision
+        servers_before = self.active_servers
+
         if action == self.ADD_SERVER:
             self.active_servers = min(
                 self.active_servers + 1,
@@ -125,14 +121,12 @@ class CloudAutoScalingEnv:
                 self.min_servers
             )
 
-        # Generate incoming traffic
         (
             self.traffic_level,
             incoming_requests,
             traffic_rate
         ) = self.traffic_generator.step()
 
-        # Process incoming requests
         capacity = (
             self.active_servers *
             self.config.server_capacity
@@ -153,14 +147,12 @@ class CloudAutoScalingEnv:
 
         self.queue_length = remaining_queue - dropped
 
-        # Calculate performance metrics
         latency = self.queue_length / capacity
 
         latency_violation = (
             latency > self.config.latency_target
         )
 
-        # Calculate reward
         cost = (
             self.active_servers *
             self.config.server_cost
@@ -176,10 +168,16 @@ class CloudAutoScalingEnv:
             self.config.dropped_request_penalty
         )
 
+        if self.active_servers != servers_before:
+            scaling_penalty = self.config.scaling_penalty
+        else:
+            scaling_penalty = 0.0
+
         reward = (
             -cost
             -latency_penalty
             -dropped_penalty
+            -scaling_penalty
         )
 
         self.time_step += 1
